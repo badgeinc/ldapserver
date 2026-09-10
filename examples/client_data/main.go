@@ -18,7 +18,7 @@ import (
 	"syscall"
 
 	ldapmsg "github.com/vjeantet/goldap/message"
-	ldap "github.com/vjeantet/ldapserver"
+	ldap "github.com/badgeinc/ldapserver"
 )
 
 func main() {

@@ -188,6 +188,20 @@ func (c *client) serve() {
 			}
 		}
 
+		// Same reasoning for BindRequest: a handler completing a SASL
+		// negotiation with a security layer swaps the connection's
+		// reader/writer via SetConn, the same way StartTLS does. Handled
+		// in a goroutine, this loop would already be blocked reading the
+		// next message through the pre-swap reader by the time SetConn
+		// runs, so the client's first protected message would be read as
+		// plaintext and fail to parse. A client has no reason to pipeline
+		// a request ahead of an outstanding bind completing anyway.
+		if _, ok := message.ProtocolOp().(ldap.BindRequest); ok {
+			c.wg.Add(1)
+			c.ProcessRequestMessage(&message)
+			continue
+		}
+
 		// TODO: go/non go routine choice should be done in the ProcessRequestMessage
 		// not in the client.serve func
 		c.wg.Add(1)

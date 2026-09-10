@@ -1,4 +1,4 @@
-module github.com/vjeantet/ldapserver
+module github.com/badgeinc/ldapserver
 
 go 1.25.7
 
