@@ -15,7 +15,7 @@ type client struct {
 	rwc           net.Conn
 	br            *bufio.Reader
 	bw            *bufio.Writer
-	chanOut       chan *ldap.LDAPMessage
+	chanOut       chan writerJob
 	wg            sync.WaitGroup
 	closing       chan bool
 	shutdownDone  chan struct{}
@@ -48,10 +48,17 @@ func (c *client) SetData(data any) {
 	c.data = data
 }
 
+// SetConn swaps the connection's reader/writer, e.g. after a STARTTLS or a
+// SASL security layer negotiates. The swap is applied on the same writer
+// goroutine that flushes queued responses (see serve()'s writer goroutine
+// and writerJob), and this call blocks until that actually happens -- so
+// any response written via a ResponseWriter before this call is guaranteed
+// to reach the wire on the old connection first, and the caller can safely
+// read the next request through the new one as soon as this returns.
 func (c *client) SetConn(conn net.Conn) {
-	c.rwc = conn
-	c.br = bufio.NewReader(c.rwc)
-	c.bw = bufio.NewWriter(c.rwc)
+	applied := make(chan struct{})
+	c.chanOut <- writerJob{newConn: conn, applied: applied}
+	<-applied
 }
 
 func (c *client) GetMessageByID(messageID int) (*Message, bool) {
@@ -98,12 +105,25 @@ func (c *client) serve() {
 	// Create the ldap response queue to be writted to client (buffered to 20)
 	// buffered to 20 means that If client is slow to handler responses, Server
 	// Handlers will stop to send more respones
-	c.chanOut = make(chan *ldap.LDAPMessage)
+	c.chanOut = make(chan writerJob)
 	c.writeDone = make(chan bool)
-	// for each message in c.chanOut send it to client
+	// For each job in c.chanOut, either write the message to the client or,
+	// for a connection swap, apply it -- both on this one goroutine, so a
+	// swap queued after a message is guaranteed to happen only once that
+	// message has actually been flushed, and c.rwc/c.br/c.bw only ever have
+	// one writer.
 	go func() {
-		for msg := range c.chanOut {
-			c.writeMessage(msg)
+		for job := range c.chanOut {
+			if job.newConn != nil {
+				c.rwc = job.newConn
+				c.br = bufio.NewReader(c.rwc)
+				c.bw = bufio.NewWriter(c.rwc)
+			} else {
+				c.writeMessage(job.msg)
+			}
+			if job.applied != nil {
+				close(job.applied)
+			}
 		}
 		close(c.writeDone)
 	}()
@@ -120,7 +140,7 @@ func (c *client) serve() {
 
 				m := ldap.NewLDAPMessageWithProtocolOp(r)
 
-				c.chanOut <- m
+				c.chanOut <- writerJob{msg: m}
 				c.rwc.SetReadDeadline(time.Now().Add(time.Millisecond))
 				return
 			case <-c.closing:
@@ -253,6 +273,19 @@ func (c *client) writeMessage(m *ldap.LDAPMessage) {
 	c.bw.Flush()
 }
 
+// writerJob is one item processed by serve()'s writer goroutine: either an
+// LDAP message to write, or a connection swap (from SetConn) to apply once
+// every previously queued message has been flushed. Routing both through
+// the same channel guarantees that ordering, and keeps every mutation of
+// c.rwc/c.br/c.bw on the one goroutine that also flushes to them. applied,
+// when set, is closed once this job has been processed, so a caller (e.g.
+// SetConn) can block until its effect is visible.
+type writerJob struct {
+	msg     *ldap.LDAPMessage
+	newConn net.Conn
+	applied chan struct{}
+}
+
 // ResponseWriter interface is used by an LDAP handler to
 // construct an LDAP response.
 type ResponseWriter interface {
@@ -261,21 +294,21 @@ type ResponseWriter interface {
 }
 
 type responseWriterImpl struct {
-	chanOut   chan *ldap.LDAPMessage
+	chanOut   chan writerJob
 	messageID int
 }
 
 func (w responseWriterImpl) Write(po ldap.ProtocolOp) {
 	m := ldap.NewLDAPMessageWithProtocolOp(po)
 	m.SetMessageID(w.messageID)
-	w.chanOut <- m
+	w.chanOut <- writerJob{msg: m}
 }
 
 func (w responseWriterImpl) writeWithControls(po ldap.ProtocolOp, controls ldap.Controls) {
 	m := ldap.NewLDAPMessageWithProtocolOp(po)
 	m.SetMessageID(w.messageID)
 	m.SetControls(controls.Pointer())
-	w.chanOut <- m
+	w.chanOut <- writerJob{msg: m}
 }
 
 // controlsWriter is an optional interface for ResponseWriter implementations
