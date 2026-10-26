@@ -174,3 +174,38 @@ func TestGarbageBytes_NoServerCrash(t *testing.T) {
 	}
 	conn2.Close()
 }
+
+func TestBindRequestSplitAcrossWrites(t *testing.T) {
+	_, addr, stop := listenOnAvailablePort(t)
+	defer stop()
+
+	conn, err := net.DialTimeout("tcp", addr.String(), time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	split := len(rawBindRequest) / 2
+	if _, err := conn.Write(rawBindRequest[:split]); err != nil {
+		t.Fatalf("write first half: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := conn.Write(rawBindRequest[split:]); err != nil {
+		t.Fatalf("write second half: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	resp, err := decodeMessage(buf[:n])
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ProtocolOpName() != "BindResponse" {
+		t.Fatalf("expected BindResponse, got %s", resp.ProtocolOpName())
+	}
+}
