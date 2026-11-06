@@ -163,9 +163,6 @@ func (c *client) serve() {
 		if c.srv.ReadTimeout != 0 {
 			c.rwc.SetReadDeadline(time.Now().Add(c.srv.ReadTimeout))
 		}
-		if c.srv.WriteTimeout != 0 {
-			c.rwc.SetWriteDeadline(time.Now().Add(c.srv.WriteTimeout))
-		}
 
 		//Read client input as a ASN1/BER binary message
 		messagePacket, err := c.ReadPacket()
@@ -182,10 +179,10 @@ func (c *client) serve() {
 		message, err := messagePacket.readMessage()
 
 		if err != nil {
-			Logger.Printf("Error reading Message : %s\n\t%x", err.Error(), messagePacket.bytes)
+			Logger.Printf("Error reading Message : %s", err.Error())
 			continue
 		}
-		Logger.Printf("<<< %d - %s - hex=%x", c.Numero, message.ProtocolOpName(), messagePacket)
+		Logger.Printf("<<< %d - %s", c.Numero, message.ProtocolOpName())
 
 		// TODO: Use a implementation to limit runnuning request by client
 		// solution 1 : when the buffered output channel is full, send a busy
@@ -266,11 +263,17 @@ func (c *client) close() {
 	Logger.Printf("client [%d] connection closed", c.Numero)
 }
 
+// writeMessage writes m to the client, setting the write deadline just before the write.
 func (c *client) writeMessage(m *ldap.LDAPMessage) {
 	data, _ := m.Write()
-	Logger.Printf(">>> %d - %s - hex=%x", c.Numero, m.ProtocolOpName(), data.Bytes())
+	Logger.Printf(">>> %d - %s", c.Numero, m.ProtocolOpName())
+	if c.srv.WriteTimeout != 0 {
+		c.rwc.SetWriteDeadline(time.Now().Add(c.srv.WriteTimeout))
+	}
 	c.bw.Write(data.Bytes())
-	c.bw.Flush()
+	if err := c.bw.Flush(); err != nil {
+		Logger.Printf("Error writing message to client %d: %s", c.Numero, err)
+	}
 }
 
 // writerJob is one item processed by serve()'s writer goroutine: either an

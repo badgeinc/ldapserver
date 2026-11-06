@@ -29,7 +29,7 @@ func readMessagePacket(br *bufio.Reader) (*messagePacket, error) {
 func (msg *messagePacket) readMessage() (m ldap.LDAPMessage, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("invalid packet received hex=%x, %#v", msg.bytes, r)
+			err = fmt.Errorf("invalid packet received: %#v", r)
 		}
 	}()
 
