@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	goldap "github.com/go-ldap/ldap/v3"
 	ldap "github.com/vjeantet/goldap/message"
 )
 
@@ -115,5 +116,88 @@ func TestShutdownListenerRace(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatalf("iter %d: serve() did not return after Stop()", i)
 		}
+	}
+}
+
+const testWriteTimeout = 100 * time.Millisecond
+
+// startWriteTimeoutTestServer serves routes with testWriteTimeout set and returns its address.
+func startWriteTimeoutTestServer(t *testing.T, routes *RouteMux) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	server := NewServer()
+	server.ReadTimeout = 5 * time.Second
+	server.WriteTimeout = testWriteTimeout
+	server.Handle(routes)
+	server.Listener = ln
+	go server.serve()
+	t.Cleanup(server.Stop)
+	return ln.Addr().String()
+}
+
+// bindExpectingResponse sends rawBindRequest on conn and fails unless a BindResponse comes back.
+func bindExpectingResponse(t *testing.T, conn net.Conn) {
+	t.Helper()
+	if _, err := conn.Write(rawBindRequest); err != nil {
+		t.Fatalf("write bind request: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	resp, err := decodeMessage(buf[:n])
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ProtocolOpName() != "BindResponse" {
+		t.Fatalf("expected BindResponse, got %s", resp.ProtocolOpName())
+	}
+}
+
+// TestWriteTimeoutAfterIdle checks that a bind after an idle longer than WriteTimeout gets its response while its handler is still running.
+func TestWriteTimeoutAfterIdle(t *testing.T) {
+	routes := NewRouteMux()
+	routes.Bind(func(w ResponseWriter, m *Message) {
+		w.Write(NewBindResponse(LDAPResultSuccess))
+		time.Sleep(testWriteTimeout / 2)
+	})
+	addr := startWriteTimeoutTestServer(t, routes)
+
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	bindExpectingResponse(t, conn)
+	time.Sleep(3 * testWriteTimeout)
+	bindExpectingResponse(t, conn)
+}
+
+// TestWriteTimeoutSlowSearch checks that a search response written more than WriteTimeout after its request still reaches the client.
+func TestWriteTimeoutSlowSearch(t *testing.T) {
+	routes := NewRouteMux()
+	routes.Search(func(w ResponseWriter, m *Message) {
+		time.Sleep(3 * testWriteTimeout)
+		w.Write(NewSearchResultDoneResponse(LDAPResultSuccess))
+	})
+	addr := startWriteTimeoutTestServer(t, routes)
+
+	conn, err := goldap.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetTimeout(2 * time.Second)
+
+	req := goldap.NewSearchRequest("dc=example", goldap.ScopeWholeSubtree, goldap.NeverDerefAliases, 0, 0, false, "(objectClass=*)", nil, nil)
+	if _, err := conn.Search(req); err != nil {
+		t.Fatalf("search: %v", err)
 	}
 }
